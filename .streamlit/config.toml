@@ -3,3 +3,6 @@ gatherUsageStats = false
 
 [server]
 maxUploadSize = 50
+
+[theme]
+primaryColor = "#4f46e5"
