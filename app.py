@@ -429,7 +429,7 @@ with st.sidebar:
         run_btn = st.button("Run", type="primary")
 
 # ----------------------------------------------------------------------------- header + run
-st.title("🎬 Find the Promos")
+st.title("Find the Promos")
 st.caption("Reads microdrama screenplays and shortlists 20-60s promo clips: hook in the first 3s, ends on a "
            "cliffhanger, makes sense to a stranger. An editor approves; it does not replace one.")
 
