@@ -34,10 +34,13 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 from sample_data import write_sample_pack  # noqa: E402
 from webdata import PERSONAS, build_clips  # noqa: E402
 
-st.set_page_config(page_title="Find the Promos", layout="wide")
+KUKU_LOGO = "https://kukufm.com/appLogos/kuku-logo.png"
+KUKU_FAVICON = "https://d1l07mcd18xic4.cloudfront.net/static/kukuIcons/favicon-32x32.png"
+st.set_page_config(page_title="Find the Promos", page_icon=KUKU_FAVICON, layout="wide")
 
-ACCENT = "#4f46e5"
-WARM = "#f59e0b"
+# Colours follow kukufm.com's own design tokens (primary, secondary, surface, divider, text).
+ACCENT = "#fc5237"
+WARM = "#3e434c"
 SRC_REAL = "Real run: 50 episodes (scores only)"
 SRC_SAMPLE = "Built-in sample (invented show)"
 SRC_UPLOAD = "Upload my own pack"
@@ -45,10 +48,38 @@ SRC_UPLOAD = "Upload my own pack"
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 2.2rem; max-width: 1250px;}
-    div[data-testid="stMetricValue"] {font-size: 1.7rem;}
-    .pill {display:inline-block; padding:2px 10px; border-radius:999px; font-size:0.78rem;
-           background:#eef2ff; color:#3730a3; margin-right:6px;}
+    @import url('https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&display=swap');
+    html, body, [class*="css"], .stApp, button, input, textarea {font-family: 'Figtree', sans-serif !important;}
+    .stApp {background: #f9fafa;}
+    [data-testid="stHeader"] {background: transparent;}
+    .block-container {padding-top: 3.2rem; max-width: 1250px;}
+    code {color: #e75115 !important; background: #fff6f6 !important;}
+    [data-testid="stSidebar"] {background: #ffffff; border-right: 1px solid #dee2e6;}
+    div[data-testid="stMetricValue"] {font-size: 1.7rem; color: #1a1a1a; font-weight: 700;}
+    div[data-testid="stVerticalBlockBorderWrapper"] {border-radius: 14px;}
+    div[data-testid="stVerticalBlockBorderWrapper"] > div {background: #ffffff; border-radius: 14px;}
+    button[kind="primary"] {background: linear-gradient(90deg, #e75115, #ff733a); border: 0; border-radius: 999px;
+                            font-weight: 700; color: #fff;}
+    button[kind="secondary"] {border-radius: 999px; border: 1px solid #dee2e6;}
+    .stTabs [data-baseweb="tab-list"] {gap: 6px; border-bottom: 1px solid #dee2e6;}
+    .stTabs [data-baseweb="tab"] {font-weight: 600; color: #4e545f;}
+    .stTabs [aria-selected="true"] {color: #e75115;}
+    .stTabs [data-baseweb="tab-highlight"] {background-color: #fc5237;}
+    .pill {display:inline-block; padding:2px 11px; border-radius:999px; font-size:0.78rem; font-weight:600;
+           background:#fff6f6; color:#e75115; border:1px solid #fae9e6; margin-right:6px;}
+    .kk-promo {background: linear-gradient(90deg, #e75115, #ff733a); color:#fff; text-align:center;
+               font-size:0.82rem; font-weight:600; padding:6px 10px; border-radius:0 0 10px 10px;}
+    .kk-header {display:flex; align-items:center; justify-content:space-between; background:#fff;
+                border:1px solid #dee2e6; border-radius:14px; padding:10px 20px; margin:10px 0 14px;}
+    .kk-header img {height:38px;}
+    .kk-nav {display:flex; gap:22px; font-weight:600; color:#4e545f; font-size:0.95rem;}
+    .kk-hero {background: linear-gradient(135deg, #fff6f6 0%, #ffffff 70%); border:1px solid #fae9e6;
+              border-radius:18px; padding:22px 26px; margin-bottom:14px;}
+    .kk-hero h1 {margin:0 0 4px; font-size:2.1rem; font-weight:800; color:#1a1a1a; letter-spacing:-0.5px;}
+    .kk-hero p {margin:0; color:#4e545f; font-size:1rem;}
+    .kk-footer {text-align:center; color:#7a808c; font-size:0.8rem; padding:18px 0 6px; border-top:1px solid #dee2e6;
+                margin-top:26px;}
+    .kk-footer a {color:#e75115; text-decoration:none; font-weight:600;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -429,9 +460,21 @@ with st.sidebar:
         run_btn = st.button("Run", type="primary")
 
 # ----------------------------------------------------------------------------- header + run
-st.title("Find the Promos")
-st.caption("Reads microdrama screenplays and shortlists 20-60s promo clips: hook in the first 3s, ends on a "
-           "cliffhanger, makes sense to a stranger. An editor approves; it does not replace one.")
+st.markdown(
+    f"""
+    <div class="kk-promo">Independent assignment prototype for the Kuku AI Generalist brief (Problem 1). Not an official Kuku product.</div>
+    <div class="kk-header">
+        <img src="{KUKU_LOGO}" alt="kuku" />
+        <div class="kk-nav"><span>AI Generalist Assignment</span><span style="color:#e75115">Problem 1: Find the Promos</span></div>
+    </div>
+    <div class="kk-hero">
+        <h1>Find the Promos</h1>
+        <p>Reads microdrama screenplays and shortlists 20-60s promo clips: hook in the first 3s, ends on a
+        cliffhanger, makes sense to a stranger. An editor approves; it does not replace one.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 if (run_btn or estimate_btn) and engine.startswith("Gemini") and not key.strip():
     st.warning("Paste a Gemini API key, or switch to the offline engine.")
@@ -505,3 +548,10 @@ with st.expander("How it works and what it cannot do"):
         "Judged from screenplay text only: acting, music and visuals are not seen. The offline engine skips "
         "steps 2 and 4 and labels every clip curve-only."
     )
+
+st.markdown(
+    '<div class="kk-footer">Independent prototype built for the Kuku AI Generalist assignment. '
+    'Not affiliated with or endorsed by Kuku. Logo and colours belong to Kuku. '
+    '<a href="https://github.com/ShreyanshMehra/kuku-promos">Code on GitHub</a></div>',
+    unsafe_allow_html=True,
+)
