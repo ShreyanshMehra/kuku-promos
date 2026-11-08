@@ -48,6 +48,20 @@ or single `.txt` in the same screenplay format. Nothing is show-specific.
 | OpenRouter / Groq / vLLM / any OpenAI-shaped API | `LLM_PROVIDER=openai_compatible` `LLM_MODEL=...` `OPENAI_API_KEY=...` `OPENAI_BASE_URL=...` |
 | offline | `LLM_PROVIDER=mock` |
 
+## Web app
+
+```bash
+streamlit run app.py
+```
+
+Pick the built-in sample (an invented 3-episode show) or upload a pack, choose the offline engine (no key)
+or paste a free Gemini key, press **Estimate** (zero API calls) or **Run**. It shows the ranked table,
+the per-clip report, the quality checks and a zip of the outputs. The uploaded pack lives in a temporary
+folder for that session only. The app runs `run.py` as a subprocess, so it matches the command line.
+
+**Deploy (free):** Streamlit Community Cloud -> New app -> this repo -> branch `main` -> main file `app.py`.
+Do not add a shared API key as a secret: each person pastes their own, so nobody spends another's quota.
+
 ## Free-tier reality
 
 Measured: Gemini's free tier allows **20 requests per day, per model** on the model I used.
