@@ -369,7 +369,8 @@ def _build_prompt(batch: List[Dict[str, Any]]) -> str:
 
 def _run_batch(batch: List[Dict[str, Any]], cfg: LLMConfig, model: Optional[str]) -> List[dict]:
     tag = "pass1.eps" + "-".join(str(e["episode_no"]) for e in batch)
-    result = call_llm(SYSTEM_PROMPT, _build_prompt(batch), PASS1_SCHEMA, cfg=cfg, model=model, tag=tag)
+    result = call_llm(SYSTEM_PROMPT, _build_prompt(batch), PASS1_SCHEMA, cfg=cfg, model=model, tag=tag,
+                      salvage_key="promos")
     if isinstance(result, list):
         result = {"promos": result}
     promos = result.get("promos") if isinstance(result, dict) else None

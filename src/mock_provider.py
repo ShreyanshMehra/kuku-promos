@@ -189,18 +189,46 @@ def _confirm(user: str) -> dict:
     return {"windows": out}
 
 
+_RE_CLIP_LINE = re.compile(r"^\+(?P<off>\d+\.\d)s\s+(?P<tag>[^:]+):\s*(?P<text>.*)$")
+
+
+def _clip_lines(user: str, cid: str) -> list:
+    """(offset, text) for each line of one CANDIDATE block in a panel prompt."""
+    out, inside = [], False
+    for line in user.splitlines():
+        if line.startswith("CANDIDATE "):
+            inside = line.split()[1] == cid
+            continue
+        if inside:
+            m = _RE_CLIP_LINE.match(line.strip())
+            if m:
+                out.append((float(m.group("off")), m.group("text").strip()))
+    return out
+
+
 def _panel(user: str) -> dict:
     views = []
     for m in re.finditer(r"^CANDIDATE\s+(\S+)\s+\(length\s+(\d+)s\)", user, re.M):
         cid, length = m.group(1), int(m.group(2))
+        lines = _clip_lines(user, cid)
         viewers = []
         for persona in (1, 2, 3):
             u = _stable_unit(f"{cid}s{persona}")
+            swipe = None if u > 0.55 else round(1 + u * length, 1)
+            when = swipe if swipe is not None else float(length)
+            quote, at = "", when
+            if lines:
+                off, text = min(lines, key=lambda lt: abs(lt[0] - when))
+                quote, at = _first_sentence(text, 60), off
+            # a deliberately fabricated quote on some clips, so flagging is exercised end to end
+            if persona == 3 and _stable_unit(cid + "fab") < 0.25:
+                quote = "an invented line that nobody says"
             viewers.append({
                 "persona": persona,
-                "swipe_at_s": None if u > 0.55 else round(1 + u * length, 1),
+                "swipe_at_s": swipe,
                 "tap_next": round(_stable_unit(f"{cid}t{persona}"), 2),
                 "reason": "MOCK PROVIDER -- deterministic placeholder.",
+                "evidence": {"at_s": at, "quote": quote},
             })
         views.append({"id": cid, "viewers": viewers})
     return {"views": views}

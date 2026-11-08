@@ -27,7 +27,8 @@ CSV_COLUMNS = [
     "rank", "feed", "promo_id", "episode", "segments", "start", "end", "duration_s",
     "archetype", "hook_line", "hook_at_s", "cliffhanger_line", "why_it_works",
     "source", "scorer", "retention", "hook_survival", "watch_through", "tap_next",
-    "swipe_spread", "curve_score", "curve_hook", "curve_end", "curve_sustain",
+    "swipe_spread", "evidence_support", "needs_review",
+    "curve_score", "curve_hook", "curve_end", "curve_sustain",
     "judge_hook", "judge_cliffhanger", "judge_standalone",
     "quality", "recruitment", "final_score", "spoils_arc", "carries_premise",
     "stranger_note", "repairs",
@@ -49,6 +50,8 @@ def _row(c: Dict[str, Any], ep: Dict[str, Any]) -> Dict[str, Any]:
         "retention": p.get("retention", ""), "hook_survival": p.get("hook_survival", ""),
         "watch_through": p.get("watch_through", ""), "tap_next": p.get("tap_next", ""),
         "swipe_spread": p.get("swipe_spread", ""),
+        "evidence_support": "" if p.get("evidence_support") is None else p.get("evidence_support"),
+        "needs_review": p.get("needs_review", ""),
         "curve_score": k.get("score", ""), "curve_hook": k.get("hook", ""),
         "curve_end": k.get("end_tension", ""), "curve_sustain": k.get("sustain", ""),
         "judge_hook": j.get("hook_strength", ""), "judge_cliffhanger": j.get("cliffhanger_strength", ""),
@@ -106,7 +109,8 @@ def _summary_line(c: Dict[str, Any]) -> str:
     p, j = c.get("panel"), c.get("judge")
     if p:
         bits = (f"hook survival {p['hook_survival']:.0%} &middot; watch-through {p['watch_through']:.0%} "
-                f"&middot; tap next {p['tap_next']:.0%}")
+                f"&middot; tap next {p['tap_next']:.0%}"
+                f"{' &middot; <b>NEEDS REVIEW: panel evidence weak</b>' if p.get('needs_review') else ''}")
     elif j:
         bits = (f"hook {j['hook_strength']}/5 &middot; cliffhanger {j['cliffhanger_strength']}/5 "
                 f"&middot; standalone {j['standalone_clarity']}/5")
@@ -115,6 +119,44 @@ def _summary_line(c: Dict[str, Any]) -> str:
     k = c.get("curve")
     curve = f" &middot; curve {k['score']:.2f}" if k else ""
     return f"{bits}{curve} &middot; final {c['final_score']:.3f}"
+
+
+def _provenance_html(c: Dict[str, Any]) -> str:
+    """Collapsible 'how this clip was chosen' trail, from c['provenance']."""
+    steps = c.get("provenance") or []
+    if not steps:
+        return ""
+    esc = html.escape
+    from parse import seconds_to_ts
+
+    def span(a, b):
+        return "?" if a is None or b is None else f"{seconds_to_ts(a)}-{seconds_to_ts(b)}"
+
+    items = []
+    for s in steps:
+        st = s["stage"]
+        if st == "curve":
+            items.append(f"<b>curve</b> proposed {span(s['start_s'], s['end_s'])} (curve score {s['curve_score']})")
+        elif st in ("confirm", "select"):
+            if s.get("verdict") == "skipped":
+                items.append(f"<b>confirm</b> skipped: {esc(s['note'])}")
+            else:
+                v = f" verdict <b>{esc(s['verdict'])}</b>" if s.get("verdict") else ""
+                items.append(f"<b>{st}</b> ({esc(str(s.get('model')))}){v}; model's window {span(s['model_start_s'], s['model_end_s'])}")
+        elif st == "repair":
+            items.append("<b>repair</b> " + esc("; ".join(s["actions"])) + f" &rarr; {span(s['start_s'], s['end_s'])}")
+        elif st == "panel":
+            ev = "" if s.get("evidence_support") is None else f", evidence support {s['evidence_support']:.0%}"
+            rv = " <b>(needs review)</b>" if s.get("needs_review") else ""
+            items.append(f"<b>panel</b> ({esc(str(s.get('model')))}) retention {s['retention']}, "
+                         f"hook survival {s['hook_survival']}, tap next {s['tap_next']}{ev}{rv}")
+        elif st == "judge":
+            items.append(f"<b>judge</b> ({esc(str(s.get('model')))}) quality {s['quality']}")
+        elif st == "rank":
+            items.append(f"<b>rank</b> #{s['rank']}: quality {s['quality']} &times; recruitment {s['recruitment']} "
+                         f"= {s['final_score']} ({esc(s['feed'])})")
+    return ("<details><summary class='m'>how this clip was chosen</summary><ol class='m'>"
+            + "".join(f"<li>{i}</li>" for i in items) + "</ol></details>")
 
 
 def write_html(path: str, ranked: List[Dict[str, Any]], by_ep: Dict[int, Dict[str, Any]], meta: Dict[str, Any]) -> None:
@@ -157,13 +199,14 @@ def write_html(path: str, ranked: List[Dict[str, Any]], by_ep: Dict[int, Dict[st
         )
         if c.get("panel"):
             reasons = "; ".join(
-                f"{_PERSONA_LABEL.get(v.get('persona'), 'viewer')}: {v['reason']}"
+                f"{_PERSONA_LABEL.get(v.get('persona'), 'viewer')} [{v.get('evidence_status', 'unchecked')}]: {v['reason']}"
                 for v in c["panel"]["viewers"] if v.get("reason")
             )
             if reasons:
                 parts.append(f"<p class='m'>panel: {esc(reasons)}</p>")
         if c["repairs"]:
             parts.append(f"<p class='m'>boundary repairs: {esc(' | '.join(c['repairs']))}</p>")
+        parts.append(_provenance_html(c))
         lines = []
         for ln in clip_lines(ep, c):
             cls = ""

@@ -78,16 +78,39 @@ JUDGE_SCHEMA = {
 # clip rendering for the judge
 # --------------------------------------------------------------------------
 
+CARRIED_MIN_S = 0.5     # a beat still playing this long after the clip opens counts as on screen
+
+
+def clip_beat_list(ep: Dict[str, Any], cand: Dict[str, Any]) -> List[tuple]:
+    """
+    Every beat a viewer of the clip would see, as (beat, carried_in).
+
+    Camera, action and sound beats are PARALLEL tracks: a shot or action that began a moment
+    before the cut is still on screen when the clip opens. Selecting only beats that START
+    inside the clip hid those from the panel in 59 of 68 ranked clips (e.g. the action "the
+    matriarch turns and barks an order" -- the visual hook). Dialogue is never carried in,
+    because the boundary snapper never lets a spoken line straddle the start.
+    """
+    s, e = cand["start_s"], cand["end_s"]
+    out = []
+    for b in ep["beats"]:
+        inside = b["start_s"] >= s - 1e-6 and b["start_s"] < e - 1e-6
+        carried = b["start_s"] < s - 1e-6 and b["end_s"] > s + CARRIED_MIN_S
+        if inside or carried:
+            out.append((b, carried and not inside))
+    return out
+
+
 def clip_lines(ep: Dict[str, Any], cand: Dict[str, Any]) -> List[str]:
     """Clip text with offsets relative to the clip start, so the judge can see 'first 3s'."""
     out = []
-    for b in ep["beats"]:
-        if b["start_s"] < cand["start_s"] - 1e-6 or b["start_s"] >= cand["end_s"] - 1e-6:
-            continue
+    for b, carried in clip_beat_list(ep, cand):
         tag = b["speaker"] if b["is_dialogue"] else b["type"]
         if b["is_dialogue"] and b["emotion"]:
             tag = f"{tag}({b['emotion']})"
-        out.append(f"+{b['start_s'] - cand['start_s']:04.1f}s {tag}: {b['text']}")
+        if carried:
+            tag = f"{tag} (already on screen when the clip opens)"
+        out.append(f"+{max(0.0, b['start_s'] - cand['start_s']):04.1f}s {tag}: {b['text']}")
     return out
 
 
@@ -131,7 +154,7 @@ def judge_candidates(
             try:
                 result = call_llm(
                     JUDGE_SYSTEM, _judge_prompt(batch, by_ep), JUDGE_SCHEMA,
-                    cfg=cfg, model=judge_model, tag=tag,
+                    cfg=cfg, model=judge_model, tag=tag, salvage_key="scores",
                 )
             except LLMError as exc:
                 log(f"  pass2 batch {bi}/{len(batches)} FAILED: {str(exc)[:120]}")
@@ -255,6 +278,43 @@ def mark_duplicates(ranked: List[Dict[str, Any]], names: Set[str]) -> None:
 # driver
 # --------------------------------------------------------------------------
 
+def build_provenance(c: Dict[str, Any], confirm_model: Optional[str], judge_model: Optional[str]) -> List[Dict[str, Any]]:
+    """
+    One readable trail per clip: what the curve proposed, what the model did to it, which
+    mechanical repairs ran, how the panel scored it, and how the final rank was computed.
+    Assembled from fields the pipeline already records, so it adds no data and no API cost.
+    """
+    steps: List[Dict[str, Any]] = []
+    cw = c.get("curve_window")
+    if c.get("curve") and cw:
+        steps.append({"stage": "curve", "start_s": cw[0], "end_s": cw[1],
+                      "curve_score": c["curve"]["score"], "note": "window found by the tension curve (no model)"})
+    src = c.get("source", "llm-selected")
+    mw = c.get("model_window") or [None, None]
+    if src == "llm-confirmed":
+        steps.append({"stage": "confirm", "model": confirm_model,
+                      "verdict": "trim" if c.get("trimmed_by_model") else "keep",
+                      "model_start_s": mw[0], "model_end_s": mw[1]})
+    elif src == "curve-only":
+        steps.append({"stage": "confirm", "verdict": "skipped",
+                      "note": "no model confirmation (offline run or model unavailable)"})
+    else:
+        steps.append({"stage": "select", "model": confirm_model, "model_start_s": mw[0], "model_end_s": mw[1]})
+    if c.get("repairs"):
+        steps.append({"stage": "repair", "actions": list(c["repairs"]),
+                      "start_s": c["start_s"], "end_s": c["end_s"]})
+    p, j = c.get("panel"), c.get("judge")
+    if p:
+        steps.append({"stage": "panel", "model": judge_model, "retention": p["retention"],
+                      "hook_survival": p["hook_survival"], "tap_next": p["tap_next"],
+                      "evidence_support": p.get("evidence_support"), "needs_review": p.get("needs_review")})
+    elif j:
+        steps.append({"stage": "judge", "model": judge_model, "quality": c["quality"]})
+    steps.append({"stage": "rank", "quality": c["quality"], "recruitment": c["recruitment"],
+                  "final_score": c["final_score"], "rank": c["rank"], "feed": c["feed"]})
+    return steps
+
+
 def rank_candidates(
     candidates: List[Dict[str, Any]],
     episodes: List[Dict[str, Any]],
@@ -327,6 +387,7 @@ def rank_candidates(
         c["rank"] = i
         early = c["episode"] <= EARLY_EP_MAX
         c["feed"] = "post_first" if (early and not c["spoils_flag"]) else "deeper_cut"
+        c["provenance"] = build_provenance(c, cfg.model, judge_model)
 
     post_first = [c for c in unique if c["feed"] == "post_first"]
     deeper = sorted(
@@ -365,16 +426,20 @@ TIER_MESSAGES = {
 }
 
 
-def confidence_tier(ranked: List[Dict[str, Any]], mock: bool = False, offline: bool = False) -> Dict[str, Any]:
+def confidence_tier(ranked: List[Dict[str, Any]], mock: bool = False, offline: bool = False,
+                    unscored: int = 0) -> Dict[str, Any]:
     """
     How much should a reviewer trust this run? Computed from what actually happened to
-    each ranked clip, not from the flags the run was started with.
+    each clip, not from the flags the run was started with.
 
-      full     every clip model-confirmed (or model-selected) AND model-scored
-      partial  at least half model-confirmed, but some curve-only or unscored
+      full     every clip model-confirmed (or model-selected) AND model-scored, none lost
+      partial  at least half model-confirmed, but some curve-only, unscored, or LOST
       degraded most clips are curve-only fallbacks
       offline  zero-API run
       mock     placeholder model output
+
+    `unscored` counts candidates that could not be scored and so never reached the ranking.
+    They are invisible in `ranked`, so a run that silently lost some must not read as FULL.
     """
     total = len(ranked)
     src = {}
@@ -391,13 +456,17 @@ def confidence_tier(ranked: List[Dict[str, Any]], mock: bool = False, offline: b
         tier = "empty"
     elif offline or src.get("curve-only", 0) == total:
         tier = "offline" if offline else "degraded"
-    elif model_sel == total and scored == total:
+    elif model_sel == total and scored == total and unscored == 0:
         tier = "full"
     elif model_sel >= total * 0.5:
         tier = "partial"
     else:
         tier = "degraded"
-    return {"tier": tier, "message": TIER_MESSAGES[tier], "counts": counts}
+    counts["unscored_missing_from_ranking"] = unscored
+    message = TIER_MESSAGES[tier]
+    if unscored and tier in ("partial", "degraded"):
+        message += f" {unscored} candidate(s) could not be scored and are missing from the ranking."
+    return {"tier": tier, "message": message, "counts": counts}
 
 
 def segments_str(c: Dict[str, Any]) -> str:

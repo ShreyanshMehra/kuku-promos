@@ -643,8 +643,128 @@ class ConfidenceTierTests(unittest.TestCase):
     def test_counts_and_message_are_reported(self):
         from rank import confidence_tier as ct
         t = ct([self.clip(), self.clip("curve-only", False)])
-        self.assertEqual(t["counts"], {"clips": 2, "model_selected": 1, "curve_only": 1, "model_scored": 1})
+        self.assertEqual(t["counts"], {"clips": 2, "model_selected": 1, "curve_only": 1, "model_scored": 1,
+                                       "unscored_missing_from_ranking": 0})
         self.assertTrue(t["message"])
+
+    def test_candidates_lost_before_ranking_stop_a_run_from_reading_as_full(self):
+        # Regression: a run that silently lost 3 unscored candidates was reported as FULL
+        from rank import confidence_tier as ct
+        clips = [self.clip() for _ in range(4)]
+        self.assertEqual(ct(clips, unscored=0)["tier"], "full")
+        t = ct(clips, unscored=3)
+        self.assertEqual(t["tier"], "partial")
+        self.assertIn("3 candidate(s)", t["message"])
+        self.assertEqual(t["counts"]["unscored_missing_from_ranking"], 3)
+
+
+class JsonSalvageTests(unittest.TestCase):
+    VIEW = '{"id": "%s", "viewers": [{"persona": 1, "swipe_at_s": null, "tap_next": 0.8}]}'
+
+    def damaged(self, tail):
+        return '{"views": [' + self.VIEW % "a" + ", " + self.VIEW % "b" + tail
+
+    def test_complete_objects_survive_a_damaged_tail(self):
+        for tail in ("].}", "] DX]}", "]}  extra words", ",]}"):
+            got = llm.salvage_list(self.damaged(tail), "views")
+            self.assertEqual([v["id"] for v in got], ["a", "b"], repr(tail))
+
+    def test_a_trailing_comma_inside_the_last_object_is_forgiven(self):
+        text = '{"views": [' + self.VIEW % "a" + ', {"id": "b", "viewers": [{"persona": 1, "tap_next": 0.5},]}]}'
+        self.assertEqual([v["id"] for v in llm.salvage_list(text, "views")], ["a", "b"])
+
+    def test_a_truncated_object_is_dropped_not_guessed(self):
+        text = '{"views": [' + self.VIEW % "a" + ', {"id": "b", "viewers": [{"persona": 1, "tap_ne'
+        self.assertEqual([v["id"] for v in llm.salvage_list(text, "views")], ["a"])
+
+    def test_braces_and_commas_inside_strings_are_not_structure(self):
+        text = '{"views": [{"id": "a, ]", "note": "has } and { and ,] inside"}, {"id": "b"}]}'
+        self.assertEqual([v["id"] for v in llm.salvage_list(text, "views")], ["a, ]", "b"])
+        self.assertEqual(llm.salvage_list("no such key here", "views"), [])
+
+    def test_extract_json_alone_now_forgives_trailing_commas(self):
+        self.assertEqual(llm.extract_json('{"a": [1, 2,], "b": {"c": 1,},}'), {"a": [1, 2], "b": {"c": 1}})
+
+    # object "b" is missing a comma INSIDE it: no whole-document fallback can parse this
+    BROKEN_B = '{"id": "b", "viewers": [{"persona": 1 "tap_next": 0.8}]}'
+
+    def test_call_llm_salvages_instead_of_paying_for_a_repair_call(self):
+        calls = []
+        text = '{"views": [' + self.VIEW % "a" + ", " + self.BROKEN_B + ", " + self.VIEW % "c" + "]}"
+
+        def flaky(system, user, schema, cfg):
+            calls.append(1)
+            return text
+
+        llm.PROVIDERS["flaky"] = flaky
+        self.addCleanup(llm.PROVIDERS.pop, "flaky", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = llm.LLMConfig(provider="flaky", cache_dir=os.path.join(tmp, "c"), raw_dir=os.path.join(tmp, "r"))
+            before = llm.USAGE.salvaged
+            got = llm.call_llm("s", "u", cfg=cfg, salvage_key="views")
+            self.assertEqual([v["id"] for v in got["views"]], ["a", "c"])   # b lost, a and c kept
+            self.assertEqual(len(calls), 1, "no repair call when objects can be salvaged")
+            self.assertEqual(llm.USAGE.salvaged, before + 1)
+            # without a salvage key the old behaviour stands: repair attempt, then a clear failure
+            with self.assertRaises(llm.LLMError):
+                llm.call_llm("s2", "u2", cfg=cfg)
+            self.assertEqual(len(calls), 3)
+
+    def test_a_clip_that_keeps_failing_is_retried_alone_then_left_unscored_never_invented(self):
+        import re
+        import panel
+        ep = tagged_episode()
+        cands = [{"id": f"ep1-w{i}", "episode": 1, "start_s": 31.0, "end_s": 62.0, "duration_s": 31.0}
+                 for i in (1, 2, 3)]
+        asked = []
+        good = ('{"id": "%s", "viewers": [{"persona": 1, "swipe_at_s": null, "tap_next": 0.9},'
+                ' {"persona": 2, "swipe_at_s": 4.0}, {"persona": 3, "swipe_at_s": 2.0}]}')
+
+        def stubborn(system, user, schema, cfg):
+            ids = re.findall(r"^CANDIDATE (\S+)", user, re.M)
+            asked.append(ids)
+            ok = [good % i for i in ids if i == "ep1-w1"]       # w2 and w3 are never answered
+            return '{"views": [' + ", ".join(ok) + "]}"
+
+        llm.PROVIDERS["stubborn"] = stubborn
+        self.addCleanup(llm.PROVIDERS.pop, "stubborn", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = llm.LLMConfig(provider="stubborn", cache_dir=os.path.join(tmp, "c"), raw_dir=os.path.join(tmp, "r"))
+            panel.run_panel(cands, {1: ep}, cfg, None, log=lambda *_: None)
+        self.assertIsNotNone(cands[0]["panel"])
+        self.assertIsNone(cands[1]["panel"], "an unanswered clip stays unscored; no score is invented")
+        self.assertIsNone(cands[2]["panel"])
+        # full batch, then the two stragglers together, then each ALONE as the last resort
+        self.assertEqual(asked, [["ep1-w1", "ep1-w2", "ep1-w3"], ["ep1-w2", "ep1-w3"], ["ep1-w2"], ["ep1-w3"]])
+
+    def test_panel_keeps_the_good_views_and_retries_only_the_missing_one(self):
+        import re
+        import panel
+        ep = tagged_episode()
+        cands = [{"id": f"ep1-w{i}", "episode": 1, "start_s": 31.0, "end_s": 62.0, "duration_s": 31.0}
+                 for i in (1, 2, 3)]
+        asked = []
+
+        def view(cid):
+            return ('{"id": "%s", "viewers": [{"persona": 1, "swipe_at_s": null, "tap_next": 0.9},'
+                    ' {"persona": 2, "swipe_at_s": 4.0, "tap_next": 0}, {"persona": 3, "swipe_at_s": 2.0}]}' % cid)
+
+        def flaky(system, user, schema, cfg):
+            ids = re.findall(r"^CANDIDATE (\S+)", user, re.M)
+            asked.append(ids)
+            if len(asked) == 1:                       # first reply: the middle view is corrupted inside
+                broken = view(ids[1]).replace('"persona": 1, "swipe_at_s"', '"persona": 1 "swipe_at_s"')
+                return '{"views": [' + view(ids[0]) + ", " + broken + ", " + view(ids[2]) + "]}"
+            return '{"views": [' + ", ".join(view(i) for i in ids) + "]}"
+
+        llm.PROVIDERS["flaky2"] = flaky
+        self.addCleanup(llm.PROVIDERS.pop, "flaky2", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = llm.LLMConfig(provider="flaky2", cache_dir=os.path.join(tmp, "c"), raw_dir=os.path.join(tmp, "r"))
+            panel.run_panel(cands, {1: ep}, cfg, None, log=lambda *_: None)
+        self.assertTrue(all(c["panel"] is not None for c in cands), "every clip must end up scored")
+        self.assertEqual(len(asked), 2, "one damaged batch + one retry of ONLY what was missing")
+        self.assertEqual(asked[1], ["ep1-w2"])
 
 
 class PanelIsolationTests(unittest.TestCase):
@@ -707,6 +827,162 @@ class EstimatorTests(unittest.TestCase):
             self.assertIn("DRY RUN", text)
             self.assertIn("free daily limit", text)
             self.assertNotIn("$", text)                               # deliberately no dollar figure
+
+
+class ClipTextTests(unittest.TestCase):
+    def setUp(self):
+        self.ep = parse_episode(make_screenplay(1))      # CAMERA beat 28.0-31.0 "Close-up on Bob's face."
+
+    def test_a_beat_already_playing_when_the_clip_opens_is_shown_to_the_panel(self):
+        from rank import clip_lines
+        lines = clip_lines(self.ep, {"start_s": 29.0, "end_s": 55.0})
+        carried = [ln for ln in lines if "Close-up on Bob" in ln]
+        self.assertEqual(len(carried), 1)
+        self.assertTrue(carried[0].startswith("+00.0s"))
+        self.assertIn("already on screen", carried[0])
+
+    def test_a_beat_that_is_about_to_end_is_not_dragged_in(self):
+        from rank import clip_lines
+        # camera beat ends at 31.0; a clip opening at 30.8 sees only 0.2s of it
+        self.assertFalse(any("Close-up on Bob" in ln for ln in clip_lines(self.ep, {"start_s": 30.8, "end_s": 56.0})))
+
+    def test_dialogue_is_never_carried_in_when_the_start_is_snapped(self):
+        from rank import clip_beat_list
+        from select_promos import snap_window
+        s, e = snap_window(self.ep["beats"], 31.0, 56.0)           # 29-33s line straddles 31.0 -> pulled back
+        carried_dialogue = [b for b, carried in clip_beat_list(self.ep, {"start_s": s, "end_s": e})
+                            if carried and b["is_dialogue"]]
+        self.assertEqual(carried_dialogue, [])
+
+    def test_evidence_can_cite_a_carried_in_beat(self):
+        from panel import clip_beats, score_panel
+        beats = clip_beats(self.ep, {"start_s": 29.0, "end_s": 55.0})
+        v = [{"persona": 1, "swipe_at_s": 0.5, "tap_next": 0, "reason": "r",
+              "evidence": {"quote": "Close-up on Bob's face"}},
+             {"persona": 2, "swipe_at_s": None, "tap_next": 0.5, "reason": "r"}]
+        self.assertEqual(score_panel(26.0, v, beats)["viewers"][0]["evidence_status"], "supported")
+
+    def test_skeptic_persona_can_be_won_over(self):
+        import panel
+        self.assertIn("CAN be won over", panel.SYSTEM)
+
+
+class ProvenanceTests(unittest.TestCase):
+    def test_every_ranked_clip_carries_a_consistent_trail(self):
+        from confirm import confirm_windows
+        from lexicon import FALLBACK
+        from rank import rank_candidates
+        from report import write_html
+        from tension import find_all
+        eps = [tagged_episode(n) for n in range(1, 4)]
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = llm.LLMConfig(provider="mock", cache_dir=os.path.join(tmp, "c"), raw_dir=os.path.join(tmp, "r"))
+            sel = confirm_windows(find_all(eps, dict(FALLBACK)), eps, cfg=cfg, log=lambda *_: None)
+            out = rank_candidates(sel["candidates"], eps, cfg=cfg, judge_model=cfg.model, scorer="panel",
+                                  log=lambda *_: None)
+            self.assertTrue(out["ranked"])
+            for c in out["ranked"]:
+                stages = [s["stage"] for s in c["provenance"]]
+                self.assertEqual(stages[0], "curve")
+                self.assertEqual(stages[-1], "rank")
+                self.assertIn("panel", stages)
+                curve = c["provenance"][0]
+                self.assertEqual([curve["start_s"], curve["end_s"]], c["curve_window"])
+                rank = c["provenance"][-1]
+                self.assertEqual((rank["rank"], rank["final_score"]), (c["rank"], c["final_score"]))
+                confirm = next(s for s in c["provenance"] if s["stage"] == "confirm")
+                self.assertEqual(confirm["verdict"], "trim" if c.get("trimmed_by_model") else "keep")
+            path = os.path.join(tmp, "r.html")
+            write_html(path, out["ranked"], {e["episode_no"]: e for e in eps}, {"tier": "mock", "tier_message": "m"})
+            with open(path, encoding="utf-8") as fh:
+                self.assertIn("how this clip was chosen", fh.read())
+
+
+class PanelEvidenceTests(unittest.TestCase):
+    BEATS = [
+        {"start_off": 0.0, "end_off": 4.0, "text": "Close-up on Alice's shaking hands."},
+        {"start_off": 5.0, "end_off": 8.0, "text": '"You will never leave this house."'},
+        {"start_off": 12.0, "end_off": 14.0, "text": '"Then watch me burn it down."'},
+    ]
+
+    def viewer(self, swipe, quote, persona=1, tap=0.0):
+        v = {"persona": persona, "swipe_at_s": swipe, "tap_next": tap, "reason": "r"}
+        if quote is not None:
+            v["evidence"] = {"at_s": swipe, "quote": quote}
+        return v
+
+    def score(self, viewers, beats="default"):
+        from panel import score_panel
+        return score_panel(30.0, viewers, self.BEATS if beats == "default" else beats)
+
+    def status(self, v):
+        return self.score([v, self.viewer(None, None, 2, 0.5)])["viewers"][0]["evidence_status"]
+
+    def test_real_quote_on_screen_at_the_swipe_is_supported(self):
+        self.assertEqual(self.status(self.viewer(6.0, "never leave this house")), "supported")
+
+    def test_wrapping_quotes_and_ellipsis_are_tolerated(self):
+        self.assertEqual(self.status(self.viewer(6.0, '"never leave this..."')), "supported")
+
+    def test_invented_or_paraphrased_quote_is_unsupported(self):
+        self.assertEqual(self.status(self.viewer(6.0, "I will never let you go")), "unsupported")
+        self.assertEqual(self.status(self.viewer(6.0, "you shall never depart this home")), "unsupported")
+        self.assertEqual(self.status(self.viewer(6.0, "ab")), "unsupported")          # too short to mean anything
+
+    def test_real_quote_but_not_playing_near_the_swipe_is_flagged_as_timing_off(self):
+        # the line exists (5-8s) but this viewer swiped at 25s
+        self.assertEqual(self.status(self.viewer(25.0, "never leave this house")), "quote_ok_timing_off")
+
+    def test_a_viewer_who_watched_to_the_end_is_checked_on_the_quote_only(self):
+        self.assertEqual(self.status(self.viewer(None, "watch me burn it down", tap=0.8)), "supported")
+        self.assertEqual(self.status(self.viewer(None, "a line nobody says", tap=0.8)), "unsupported")
+
+    def test_missing_evidence_is_none_not_unsupported(self):
+        self.assertEqual(self.status(self.viewer(6.0, None)), "none")
+
+    def test_evidence_can_arrive_as_a_bare_string(self):
+        v = self.viewer(6.0, None)
+        v["evidence"] = "never leave this house"
+        self.assertEqual(self.status(v), "supported")
+
+    def test_verification_never_changes_a_score(self):
+        views = [self.viewer(None, "made up words here", 1, 0.9), self.viewer(6.0, "never leave this", 2),
+                 self.viewer(25.0, "burn it down", 3)]
+        with_check = self.score(views)
+        without = self.score(views, beats=None)
+        for k in ("hook_survival", "watch_through", "tap_next", "retention", "swipe_spread"):
+            self.assertEqual(with_check[k], without[k], k)
+        self.assertEqual(without["viewers"][0]["evidence_status"], "unchecked")
+
+    def test_review_flag_needs_two_cited_and_fewer_than_half_supported(self):
+        bad = lambda p: self.viewer(6.0, "totally invented words", p)           # noqa: E731
+        good = lambda p: self.viewer(6.0, "never leave this house", p)          # noqa: E731
+        self.assertTrue(self.score([bad(1), bad(2), bad(3)])["needs_review"])
+        self.assertTrue(self.score([good(1), bad(2), bad(3)])["needs_review"])          # 1/3 supported
+        self.assertFalse(self.score([good(1), good(2), bad(3)])["needs_review"])        # 2/3 supported
+        self.assertFalse(self.score([bad(1), self.viewer(6.0, None, 2), self.viewer(7.0, None, 3)])["needs_review"])
+        s = self.score([good(1), bad(2), bad(3)])
+        self.assertEqual(s["evidence"], {"supported": 1, "quote_ok_timing_off": 0, "unsupported": 2, "none": 0})
+        self.assertAlmostEqual(s["evidence_support"], 1 / 3, places=2)
+
+    def test_panel_prompt_demands_evidence_and_mock_run_verifies_it_end_to_end(self):
+        import panel
+        from confirm import confirm_windows
+        from lexicon import FALLBACK
+        from rank import rank_candidates
+        from tension import find_all
+        self.assertIn("evidence", panel.SYSTEM)
+        eps = [tagged_episode(n) for n in range(1, 6)]
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = llm.LLMConfig(provider="mock", cache_dir=os.path.join(tmp, "c"), raw_dir=os.path.join(tmp, "r"))
+            sel = confirm_windows(find_all(eps, dict(FALLBACK)), eps, cfg=cfg, log=lambda *_: None)
+            out = rank_candidates(sel["candidates"], eps, cfg=cfg, judge_model=cfg.model, scorer="panel",
+                                  log=lambda *_: None)
+            sts = [v["evidence_status"] for c in out["ranked"] for v in c["panel"]["viewers"]]
+            self.assertTrue(sts)
+            self.assertIn("supported", sts)                       # honest mock evidence verifies
+            self.assertTrue(all(s != "unchecked" for s in sts))   # the pipeline always runs the check
+            self.assertIn("evidence_support", out["ranked"][0]["panel"])
 
 
 if __name__ == "__main__":

@@ -94,10 +94,18 @@ hook within 3s, cliffhanger in last 6s, verbatim quotes). The validator rejected
 Measured limits, stated plainly:
 - The curve **over-proposes**: the model dropped 50% of its windows, so curve-only output (`--no-llm`) is
   noticeably weaker. Kept windows scored 0.67 on the curve vs 0.57 for dropped ones.
-- Among surviving clips the curve score does **not** predict the panel's ranking (Spearman ~0.08, n=68;
+- Among surviving clips the curve score does **not** predict the panel's ranking (Spearman ~0.06, n=68;
   range-restricted). The curve is a finder, not a ranker.
-- The panel's ordering is driven mostly by one persona (the impatient scroller). The fan almost always
-  watches to the end and the skeptic almost always swipes, so they add close to a constant.
+- The panel is still an LLM simulating viewers. The personas differ a lot in how much they discriminate:
+  the fan watches to the end 88% of the time, the scroller 23%, the skeptic 28%. In an earlier version the skeptic
+  almost never moved (a near-constant); I reworded it after seeing that, so judge that change by its output, not
+  by assumption. 85% of clips have all three viewers surviving 3s, so the panel is generous on hooks.
+- **Evidence check (deterministic, flags only):** each viewer must cite a verbatim clip line at the moment that
+  drove their decision. 94% of cited evidence held up, 2% quoted a line that is not in the clip, 1 clip is flagged
+  for human review. This catches invented reasons, not wrong judgments, and never changes a score.
+- Reliability: the small model sometimes returns malformed JSON. Complete objects are salvaged and only missing
+  clips are retried (full batch, then thirds, then one at a time). Known limit: an unclosed brace early in a reply
+  loses that whole reply; those clips are retried and, if still unanswered, left unscored (and counted, never invented).
 - Using the model for confirm + panel does **not** save tokens versus an LLM-reads-everything design
   (measured: 23.0k vs 23.2k prompt tokens on 4 episodes). The benefits are the zero-API fallback and
   an inspectable first stage, not cost.
@@ -111,7 +119,7 @@ Model IDs were checked against Google's docs on 2026-11-08 and churn quickly.
 Every run ends with a **confidence tier** (full / partial / degraded / offline / mock) computed from what
 actually happened to each ranked clip, shown in the console and as a banner in `report.html`.
 
-`python -m unittest discover -s tests -v` -> 51 tests, on synthetic screenplays (no Kuku text).
+`python -m unittest discover -s tests -v` -> 76 tests, on synthetic screenplays (no Kuku text).
 
 ## Confidentiality
 

@@ -175,7 +175,8 @@ def main() -> int:
     if not no_llm and cfg.provider == "gemini":
         meta["api_keys_configured"] = len(llm._gemini_keys())
         meta["key_switches"] = len(llm.KEY_SWITCHES)
-    tier = confidence_tier(ranking["ranked"], mock=meta["mock"], offline=no_llm)
+    tier = confidence_tier(ranking["ranked"], mock=meta["mock"], offline=no_llm,
+                           unscored=len(ranking["unjudged"]))
     meta["tier"], meta["tier_message"], meta["tier_counts"] = tier["tier"], tier["message"], tier["counts"]
 
     exhausted = llm.quota_exhausted()

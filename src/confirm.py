@@ -180,7 +180,8 @@ def confirm_windows(
 
     def run(batch: List[Dict[str, Any]], tag: str) -> bool:
         try:
-            res = call_llm(SYSTEM, _prompt(batch, by_ep), SCHEMA, cfg=cfg, model=model, tag=tag)
+            res = call_llm(SYSTEM, _prompt(batch, by_ep), SCHEMA, cfg=cfg, model=model, tag=tag,
+                           salvage_key="windows")
         except LLMError as exc:
             log(f"  confirm {tag} FAILED: {str(exc)[:110]}")
             return False

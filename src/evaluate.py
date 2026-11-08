@@ -185,6 +185,26 @@ def programmatic(out_dir: str, episodes: List[Dict[str, Any]]) -> Dict[str, Any]
         for p in panels:
             for v in p["viewers"]:
                 per.setdefault(v.get("persona"), []).append(v)
+        # --- is the panel's reasoning grounded in the clip? (deterministic check, flags only) ---
+        all_v = [v for p in panels for v in p["viewers"]]
+        statuses = Counter(v.get("evidence_status", "unchecked") for v in all_v)
+        cited = statuses["supported"] + statuses["quote_ok_timing_off"] + statuses["unsupported"]
+        by_persona_bad: Dict[str, List[int]] = {}
+        for v in all_v:
+            if v.get("evidence_status") in ("supported", "quote_ok_timing_off", "unsupported"):
+                row = by_persona_bad.setdefault(str(v.get("persona")), [0, 0])
+                row[1] += 1
+                row[0] += int(v["evidence_status"] != "supported")
+        panel_stats["evidence"] = {
+            "viewers": len(all_v),
+            "checked": cited,
+            "statuses": dict(statuses),
+            "supported_rate": round(statuses["supported"] / cited, 3) if cited else None,
+            "unsupported_rate": round(statuses["unsupported"] / cited, 3) if cited else None,
+            "clips_needing_review": sum(1 for p in panels if p.get("needs_review")),
+            "top10_needing_review": sum(1 for c in ranked[:10] if (c.get("panel") or {}).get("needs_review")),
+            "unsupported_or_off_by_persona": {k: f"{b}/{t}" for k, (b, t) in sorted(by_persona_bad.items())},
+        }
         panel_stats["per_persona"] = {}
         for persona, vs in sorted(per.items(), key=lambda kv: str(kv[0])):
             taps = [v["tap_next"] for v in vs]
@@ -315,6 +335,21 @@ def render_programmatic(p: Dict[str, Any]) -> str:
         lines.append("")
         lines.append("A persona with sd near 0, or that watches to the end every time, adds a constant, "
                      "not signal. Treat the panel's ordering as driven by the personas that move.")
+        ev = s["evidence"]
+        lines += ["", "### Is the panel's reasoning grounded in the clip? (deterministic; flags only, never changes a score)", ""]
+        if ev["checked"]:
+            lines += [
+                f"- {ev['checked']} of {ev['viewers']} simulated viewers cited a quote. "
+                f"**{ev['supported_rate']:.0%} held up** (the quote is a real clip line and, for swipers, on screen near the swipe); "
+                f"**{ev['unsupported_rate']:.0%} cited a line that is not in the clip**.",
+                f"- breakdown: `{json.dumps(ev['statuses'])}`",
+                f"- clips flagged for human review: **{ev['clips_needing_review']}** "
+                f"(**{ev['top10_needing_review']}** of the top 10)",
+                f"- viewers whose evidence failed, by persona: `{json.dumps(ev['unsupported_or_off_by_persona'])}`",
+                "- Reasons that fail this check are role-play, not reading: treat that persona's verdicts with extra suspicion.",
+            ]
+        else:
+            lines.append("- no viewer cited evidence in this run (it predates the evidence requirement, or was a cached run).")
     if p["judge_score_distribution"]:
         lines += ["", f"**Judge score distribution** (legacy scorer): `{json.dumps(p['judge_score_distribution'])}`"]
     lines += [

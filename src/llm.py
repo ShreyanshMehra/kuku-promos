@@ -33,7 +33,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import requests
@@ -108,6 +108,7 @@ class Usage:
     calls: int = 0
     cached: int = 0
     cached_prompt_tokens: int = 0
+    salvaged: int = 0
     cached_output_tokens: int = 0
     prompt_tokens: int = 0
     output_tokens: int = 0
@@ -125,6 +126,7 @@ class Usage:
         return {
             "api_calls": self.calls,
             "cache_hits": self.cached,
+            "salvaged_responses": self.salvaged,
             "retries": self.retries,
             "prompt_tokens": self.prompt_tokens,
             "output_tokens": self.output_tokens,
@@ -188,6 +190,84 @@ def _limiter(rpm: int) -> RateLimiter:
 # JSON handling
 # --------------------------------------------------------------------------
 
+def _drop_trailing_commas(s: str) -> str:
+    """Remove commas that sit directly before a closing } or ] (outside strings): a common model slip."""
+    out: List[str] = []
+    in_str = esc = False
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+            out.append(ch)
+        elif ch == ",":
+            j = i + 1
+            while j < n and s[j] in " \t\r\n":
+                j += 1
+            if not (j < n and s[j] in "}]"):
+                out.append(ch)
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def salvage_list(text: str, key: str) -> List[Any]:
+    """
+    Recover every COMPLETE object from the array under `key`, ignoring a damaged tail.
+
+    Models sometimes emit valid objects followed by junk ("}].}", a stray fragment) or a
+    trailing comma inside the last object. Rejecting the whole reply throws away the good
+    objects with the bad character, and costs another API call to retry. Here each object
+    is parsed on its own, so only a genuinely broken object is lost; the caller retries just
+    the items that are missing. Returns [] if nothing can be recovered.
+    """
+    m = re.search(r'"%s"\s*:\s*\[' % re.escape(key), text)
+    if not m:
+        return []
+    items: List[Any] = []
+    depth, in_str, esc, start = 0, False, False, -1
+    for i in range(m.end(), len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    chunk = text[start:i + 1]
+                    for candidate in (chunk, _drop_trailing_commas(chunk)):
+                        try:
+                            items.append(json.loads(candidate))
+                            break
+                        except json.JSONDecodeError:
+                            continue
+                    start = -1
+        elif ch == "]" and depth == 0:
+            break
+    return items
+
+
 def extract_json(text: str) -> Any:
     """Parse model output into JSON, tolerating fences and surrounding prose."""
     if text is None:
@@ -198,6 +278,10 @@ def extract_json(text: str) -> Any:
         s = re.sub(r"\s*```$", "", s).strip()
     try:
         return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(_drop_trailing_commas(s))
     except json.JSONDecodeError:
         pass
     # Fall back to the outermost balanced {...} or [...] in the text.
@@ -462,9 +546,14 @@ def call_llm(
     model: Optional[str] = None,
     tag: str = "call",
     use_cache: bool = True,
+    salvage_key: Optional[str] = None,
 ) -> Any:
     """
     Send one prompt, get parsed JSON back.
+
+    `salvage_key`: if the reply is not valid JSON, recover the complete objects of the array
+    under this key (see salvage_list) instead of failing the whole batch. The caller must
+    treat missing items as "not answered" and retry just those.
 
     `tag` names the raw-response file so the raw/ folder is readable.
     `model` overrides the configured model for this call (used to run the
@@ -514,22 +603,39 @@ def call_llm(
     with open(raw_path, "w", encoding="utf-8") as fh:
         fh.write(text)
 
+    def _salvaged(raw: str) -> Optional[Any]:
+        if not salvage_key:
+            return None
+        items = salvage_list(raw, salvage_key)
+        if not items:
+            return None
+        USAGE.salvaged += 1
+        return {salvage_key: items}
+
     try:
         parsed = extract_json(text)
     except LLMError:
-        # One repair attempt: ask for JSON only, no cache.
-        USAGE.retries += 1
-        repair = provider(
-            system,
-            user + "\n\nYour previous reply was not valid JSON. Reply with ONLY the JSON object, no prose, no code fences.",
-            schema,
-            cfg,
-        )
-        with open(
-            os.path.join(cfg.raw_dir, f"{tag}.{fingerprint}.repair.txt"), "w", encoding="utf-8"
-        ) as fh:
-            fh.write(repair)
-        parsed = extract_json(repair)
+        # Cheapest first: keep whatever objects are intact, at no extra API cost.
+        parsed = _salvaged(text)
+        if parsed is None:
+            # One repair attempt: ask for JSON only, no cache.
+            USAGE.retries += 1
+            repair = provider(
+                system,
+                user + "\n\nYour previous reply was not valid JSON. Reply with ONLY the JSON object, no prose, no code fences.",
+                schema,
+                cfg,
+            )
+            with open(
+                os.path.join(cfg.raw_dir, f"{tag}.{fingerprint}.repair.txt"), "w", encoding="utf-8"
+            ) as fh:
+                fh.write(repair)
+            try:
+                parsed = extract_json(repair)
+            except LLMError:
+                parsed = _salvaged(repair)
+                if parsed is None:
+                    raise
 
     USAGE.wall_s += time.monotonic() - started
 
