@@ -1,0 +1,26 @@
+# CONFIDENTIAL: Kuku's input pack and everything derived from it.
+# Screenplay text appears in beats.jsonl, raw model responses, the LLM cache,
+# the CSV/HTML reports and the blind-rating sheets. None of it may be published.
+data/
+input/
+out/
+raw/
+.cache/
+*.zip
+*.txt
+!requirements.txt
+
+# secrets
+.env
+*.key
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# os
+.DS_Store
+Thumbs.db
