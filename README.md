@@ -59,6 +59,9 @@ or paste a free Gemini key, press **Estimate** (zero API calls) or **Run**. It s
 the per-clip report, the quality checks and a zip of the outputs. The uploaded pack lives in a temporary
 folder for that session only. The app runs `run.py` as a subprocess, so it matches the command line.
 
+The third source, **Real run**, shows the scores from my full 50-episode run (`demo/`): episode, timestamps and
+numbers only. Kuku's script text is not published, so no hook lines or dialogue are included.
+
 **Deploy (free):** Streamlit Community Cloud -> New app -> this repo -> branch `main` -> main file `app.py`.
 Do not add a shared API key as a secret: each person pastes their own, so nobody spends another's quota.
 

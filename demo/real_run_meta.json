@@ -1,0 +1,11 @@
+{
+  "model": "gemini-3.6-flash",
+  "judge_model": "gemini-3.5-flash-lite",
+  "episodes": 50,
+  "windows_found": 143,
+  "dropped_by_model": 71,
+  "tier": "full",
+  "tier_message": "All clips were model-confirmed and model-scored.",
+  "run_at": "2026-11-08T07:28:08+00:00",
+  "ranked": 68
+}

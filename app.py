@@ -87,7 +87,8 @@ st.caption("Reads microdrama screenplays and shortlists 20-60s promo clips: hook
 
 with st.sidebar:
     st.header("1. Input")
-    source = st.radio("Screenplays", ["Built-in sample (invented show)", "Upload my own pack"])
+    source = st.radio("Screenplays", ["Built-in sample (invented show)", "Upload my own pack",
+                                      "Real run: 50-episode pack (scores only)"])
     uploads = None
     if source.startswith("Upload"):
         uploads = st.file_uploader("A .zip of episode .txt files, or several .txt files",
@@ -110,6 +111,23 @@ with st.sidebar:
     st.header("3. Go")
     estimate_btn = st.button("Estimate cost (no API calls)", disabled=not engine.startswith("Gemini"))
     run_btn = st.button("Run", type="primary")
+
+if source.startswith("Real run"):
+    DEMO = os.path.join(ROOT, "demo")
+    with open(os.path.join(DEMO, "real_run_meta.json"), encoding="utf-8") as fh:
+        dm = json.load(fh)
+    st.success(f"Pre-run result: {dm['ranked']} promos across {dm['episodes']} episodes, "
+               f"confidence tier **{str(dm['tier']).upper()}** ({dm['model']} confirm, {dm['judge_model']} panel).")
+    st.caption("Timestamps and scores only. The screenplay is Kuku's and is not published here, so hook lines, "
+               "cliffhanger lines and script text are left out. Run the sample, or upload the pack yourself, "
+               "to see the full output.")
+    ddf = pd.read_csv(os.path.join(DEMO, "real_run_scores.csv"))
+    st.subheader(f"{len(ddf)} promos, best first")
+    st.dataframe(ddf, use_container_width=True, hide_index=True)
+    with st.expander("Quality checks and blind-test results", expanded=True):
+        with open(os.path.join(DEMO, "real_run_metrics.md"), encoding="utf-8") as fh:
+            st.markdown(fh.read())
+    st.stop()
 
 needs_key = engine.startswith("Gemini") and not key.strip()
 if engine.startswith("Gemini") and needs_key and (run_btn or estimate_btn):
