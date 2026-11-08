@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 from sample_data import write_sample_pack  # noqa: E402
 from webdata import PERSONAS, build_clips  # noqa: E402
 
-st.set_page_config(page_title="Find the Promos", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="Find the Promos", layout="wide")
 
 ACCENT = "#4f46e5"
 WARM = "#f59e0b"
